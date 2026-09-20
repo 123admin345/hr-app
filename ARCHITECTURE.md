@@ -48,13 +48,12 @@ A custom Slack app built with Node.js and the `@slack/bolt` framework. It uses G
    - Manager clicks Approve or Reject.
    - If Reject, a modal opens to provide feedback.
    - App updates Google Sheets.
-   - App notifies the employee.
-   - If Approved, app posts an OOO announcement to the `#announcements` channel on the start date (or immediately if start date is today).
+   - App notifies the employee and HR privately after an approved request.
 
 3. **Automated Jobs:**
-   - **End-of-Year Reminders:** Runs Nov 1 and Dec 1. Checks balances and sends DMs.
-   - **Public Holidays:** Runs weekly. Checks upcoming holidays and posts to `#announcements`.
-   - **OOO Alerts:** Runs daily to check for leaves starting today and posts to `#announcements`.
+   - **Contract and Performance Reviews:** Opens contract reviews approximately 75 days before contract end dates, runs semi-annual review checks, and processes review deadlines.
+   - **Public Holidays:** Runs weekly. Checks upcoming holidays and posts to `#general`.
+   - **HR Reports:** Sends monthly leave and performance-review reports privately to HR.
 
 ## File Structure
 - `index.js`: Main entry point, initializes Bolt app and cron jobs.

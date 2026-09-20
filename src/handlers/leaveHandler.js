@@ -4,10 +4,12 @@ const {
   getEmployeeBySlackId,
   addLeaveRequest,
   updateLeaveRequestStatus,
+  getLeaveRequestById,
   updateLeaveRequestAttachments,
   updateEmployeeBalance,
 } = require('../utils/sheets');
 const { countWorkingDays, formatDate, generateRequestId } = require('../utils/dates');
+const { processedDecisionBlocks } = require('../utils/leaveDecision');
 
 /**
  * In-memory store for pending attachment requests.
@@ -18,6 +20,25 @@ const { countWorkingDays, formatDate, generateRequestId } = require('../utils/da
  * forward the full request to the manager and clear the entry.
  */
 const pendingAttachments = new Map();
+const processingLeaveDecisions = new Set();
+
+function managerMessageLocation(body) {
+  return {
+    channel: body.channel?.id || body.container?.channel_id,
+    ts: body.message?.ts || body.container?.message_ts,
+  };
+}
+
+async function replaceManagerDecisionMessage(client, body, details) {
+  const { channel, ts } = managerMessageLocation(body);
+  if (!channel || !ts) return;
+  await client.chat.update({
+    channel,
+    ts,
+    text: `${details.status === 'Approved' ? '✅' : '❌'} Leave ${details.status.toLowerCase()} — ${details.employeeName}`,
+    blocks: processedDecisionBlocks(details),
+  });
+}
 
 /**
  * Registers all leave-related handlers on the Bolt app.
@@ -330,6 +351,24 @@ function registerLeaveHandlers(app) {
     const { requestId, slackUserId, leaveType, startDate, endDate, totalDays, employeeName, rowIndex, annualUsed, annualRemaining, sickUsed, hajjUsed } = data;
 
     try {
+      if (processingLeaveDecisions.has(requestId)) return;
+      processingLeaveDecisions.add(requestId);
+      const existingRequest = await getLeaveRequestById(requestId);
+      if (!existingRequest) throw new Error('This leave request could not be found.');
+      if (existingRequest.status !== 'Pending') {
+        await replaceManagerDecisionMessage(client, body, {
+          status: existingRequest.status,
+          leaveType: existingRequest.leaveType,
+          slackUserId: existingRequest.slackUserId,
+          employeeName: existingRequest.employeeName,
+          startDate: existingRequest.startDate,
+          endDate: existingRequest.endDate,
+          totalDays: existingRequest.totalDays,
+          managerId,
+          reason: existingRequest.managerNotes,
+        });
+        return;
+      }
       await updateLeaveRequestStatus(requestId, 'Approved', '');
 
       // Update balance in Google Sheets
@@ -376,24 +415,15 @@ function registerLeaveHandlers(app) {
         });
       }
 
-      // Update the manager's message to show approved state (removes buttons)
-      await client.chat.update({
-        channel: body.channel.id,
-        ts: body.message.ts,
-        text: `✅ Leave approved — ${employeeName}`,
-        blocks: [
-          {
-            type: 'section',
-            text: {
-              type: 'mrkdwn',
-              text: `✅ *${leaveType} Leave — <@${slackUserId}>*\n*Dates:* ${formatDate(startDate)} → ${formatDate(endDate)} *(${totalDays} day(s))*\n\n*Status:* ✅ Approved by <@${managerId}>`,
-            },
-          },
-        ],
+      // Replace the original buttons with the final decision so no second action is needed.
+      await replaceManagerDecisionMessage(client, body, {
+        status: 'Approved', leaveType, slackUserId, employeeName, startDate, endDate, totalDays, managerId,
       });
 
     } catch (err) {
       logger.error('Error approving leave:', err);
+    } finally {
+      processingLeaveDecisions.delete(requestId);
     }
   });
 
@@ -402,9 +432,26 @@ function registerLeaveHandlers(app) {
     await ack();
     const data = JSON.parse(action.value);
     try {
+      const existingRequest = await getLeaveRequestById(data.requestId);
+      if (!existingRequest || existingRequest.status !== 'Pending' || processingLeaveDecisions.has(data.requestId)) {
+        if (existingRequest) {
+          await replaceManagerDecisionMessage(client, body, {
+            status: existingRequest.status,
+            leaveType: existingRequest.leaveType,
+            slackUserId: existingRequest.slackUserId,
+            employeeName: existingRequest.employeeName,
+            startDate: existingRequest.startDate,
+            endDate: existingRequest.endDate,
+            totalDays: existingRequest.totalDays,
+            managerId: body.user.id,
+            reason: existingRequest.managerNotes,
+          });
+        }
+        return;
+      }
       await client.views.open({
         trigger_id: body.trigger_id,
-        view: buildRejectModal(action.value, data.employeeName),
+        view: buildRejectModal(JSON.stringify({ ...data, ...managerMessageLocation(body) }), data.employeeName),
       });
     } catch (err) {
       logger.error('Error opening reject modal:', err);
@@ -420,6 +467,11 @@ function registerLeaveHandlers(app) {
     const reason = view.state.values.rejection_reason_block.rejection_reason_input.value;
 
     try {
+      if (processingLeaveDecisions.has(requestId)) return;
+      processingLeaveDecisions.add(requestId);
+      const existingRequest = await getLeaveRequestById(requestId);
+      if (!existingRequest) throw new Error('This leave request could not be found.');
+      if (existingRequest.status !== 'Pending') return;
       await updateLeaveRequestStatus(requestId, 'Rejected', reason);
 
       await client.chat.postMessage({
@@ -436,8 +488,14 @@ function registerLeaveHandlers(app) {
         ],
       });
 
+      await replaceManagerDecisionMessage(client, { channel: { id: data.channel }, message: { ts: data.ts } }, {
+        status: 'Rejected', leaveType, slackUserId, employeeName: existingRequest.employeeName, startDate, endDate, totalDays, managerId, reason,
+      });
+
     } catch (err) {
       logger.error('Error processing rejection:', err);
+    } finally {
+      processingLeaveDecisions.delete(requestId);
     }
   });
 }
@@ -520,4 +578,7 @@ async function _notifyManager({
   });
 }
 
-module.exports = { registerLeaveHandlers };
+module.exports = {
+  registerLeaveHandlers,
+  __testables: { processedDecisionBlocks },
+};

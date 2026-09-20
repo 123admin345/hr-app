@@ -1,11 +1,14 @@
 const cron = require('node-cron');
-const { getApprovedLeavesStartingToday, getEmployeesWithRemainingBalance, getUpcomingHolidays } = require('../utils/sheets');
+const { getUpcomingHolidays } = require('../utils/sheets');
 const { formatDate } = require('../utils/dates');
+const {
+  startPerformanceReviewCase,
+  openContractReviewsDue,
+  processPerformanceReviewDeadlines,
+  sendMonthlyPerformanceReport,
+} = require('../handlers/performanceReviewHandler');
 
-// OOO alerts go to both #general and #social
-const GENERAL_CHANNEL = process.env.GENERAL_CHANNEL_ID || '';
-const SOCIAL_CHANNEL = process.env.SOCIAL_CHANNEL_ID || '';
-// Holiday announcements go to #general only
+// Public holiday announcements go to #general only.
 const ANNOUNCEMENTS_CHANNEL = process.env.GENERAL_CHANNEL_ID || '';
 const HR_ADMIN_ID = (process.env.ADMIN_SLACK_IDS || '').split(',')[0].trim();
 
@@ -14,40 +17,6 @@ const HR_ADMIN_ID = (process.env.ADMIN_SLACK_IDS || '').split(',')[0].trim();
  * @param {import('@slack/bolt').App} app - The Bolt app instance
  */
 function registerScheduledJobs(app) {
-
-  // ─── Daily OOO Alerts (runs every day at 8:00 AM) ────────────────────────
-  // Posts to BOTH #general and #social when an employee's approved leave starts today
-  cron.schedule('0 8 * * *', async () => {
-    try {
-      const leavesToday = await getApprovedLeavesStartingToday();
-      for (const leave of leavesToday) {
-        const [, employeeName, slackUserId, leaveType, startDate, endDate, totalDays] = leave;
-        const leaveEmoji = leaveType === 'Annual' ? '🏖️' : leaveType === 'Sick' ? '🤒' : '🕌';
-        const oooMessage = {
-          text: `${leaveEmoji} ${employeeName} is on ${leaveType} Leave today`,
-          blocks: [
-            {
-              type: 'section',
-              text: {
-                type: 'mrkdwn',
-                text: `${leaveEmoji} *<@${slackUserId}> is on ${leaveType} Leave*\n\n*Period:* ${formatDate(startDate)} → ${formatDate(endDate)} (${totalDays} working day(s))\n\nPlease plan accordingly and avoid reaching out to them during this period. 🙏`,
-              },
-            },
-          ],
-        };
-        // Post to #general
-        if (GENERAL_CHANNEL) {
-          await app.client.chat.postMessage({ channel: GENERAL_CHANNEL, ...oooMessage });
-        }
-        // Post to #social
-        if (SOCIAL_CHANNEL) {
-          await app.client.chat.postMessage({ channel: SOCIAL_CHANNEL, ...oooMessage });
-        }
-      }
-    } catch (err) {
-      console.error('OOO job error:', err);
-    }
-  }, { timezone: 'Asia/Riyadh' });
 
   // ─── Weekly Public Holiday Announcements (runs every Sunday at 9:00 AM) ──
   // Checks the Public Holidays sheet for any holiday in the next 7 days
@@ -74,60 +43,6 @@ function registerScheduledJobs(app) {
     }
   }, { timezone: 'Asia/Riyadh' });
 
-  // ─── End-of-Year Reminders (runs on Nov 1 and Dec 1 at 9:00 AM) ──────────
-  // Sends a DM to every employee with unused annual leave (excluding rollover employees)
-  cron.schedule('0 9 1 11,12 *', async () => {
-    try {
-      const employees = await getEmployeesWithRemainingBalance();
-      for (const emp of employees) {
-        const isDecember = new Date().getMonth() === 11; // 0-indexed
-        if (emp.rolloverAllowed) {
-          // Special message for the 4 rollover-allowed employees
-          await app.client.chat.postMessage({
-            channel: emp.slackUserId,
-            text: `📅 Year-End Leave Balance Reminder`,
-            blocks: [
-              {
-                type: 'section',
-                text: {
-                  type: 'mrkdwn',
-                  text: `📅 *Year-End Leave Balance Reminder*\n\nHi ${emp.name}, you currently have *${emp.annualRemaining} days* of annual leave remaining.\n\nAs one of our team members with a *rollover allowance*, your unused balance will carry forward to next year. However, we encourage you to plan your time off to ensure you get the rest you deserve! 😊`,
-                },
-              },
-            ],
-          });
-        } else {
-          // Standard message for all other employees
-          await app.client.chat.postMessage({
-            channel: emp.slackUserId,
-            text: `⚠️ You have ${emp.annualRemaining} unused leave days — please submit before year end!`,
-            blocks: [
-              {
-                type: 'section',
-                text: {
-                  type: 'mrkdwn',
-                  text: `⚠️ *Year-End Leave Reminder*\n\nHi ${emp.name}, you currently have *${emp.annualRemaining} days* of annual leave remaining.\n\nOur policy does not allow unused days to roll over to the next year. ${isDecember ? '⏰ *December is here — this is your last chance!*' : 'Please make sure to submit your leave requests before *December 31st*.'}\n\nType `/request-leave` in any Slack channel to submit your request. 🗓️`,
-                },
-              },
-              {
-                type: 'actions',
-                elements: [
-                  {
-                    type: 'button',
-                    text: { type: 'plain_text', text: '🗓️ Request Leave Now', emoji: true },
-                    action_id: 'open_leave_from_reminder',
-                    style: 'primary',
-                  },
-                ],
-              },
-            ],
-          });
-        }
-      }
-    } catch (err) {
-      console.error('End-of-year reminder job error:', err);
-    }
-  }, { timezone: 'Asia/Riyadh' });
 
   // ─── Monthly Leave Report (runs on the 1st of each month at 8:00 AM) ─────
   // Sends a summary report to the HR admin
@@ -173,6 +88,52 @@ function registerScheduledJobs(app) {
       });
     } catch (err) {
       console.error('Monthly report job error:', err);
+    }
+  }, { timezone: 'Asia/Riyadh' });
+
+  // ─── Contract Renewal Reviews (daily at 9:15 AM) ──────────────────────────
+  // Starts a documented review exactly 75 calendar days (about 2.5 months)
+  // before each employee's contract end date.
+  cron.schedule('15 9 * * *', async () => {
+    try {
+      await openContractReviewsDue(app.client);
+    } catch (err) {
+      console.error('Contract renewal review job error:', err);
+    }
+  }, { timezone: 'Asia/Riyadh' });
+
+  // ─── Semi-Annual Performance Reviews (June 1 and December 1, 9:30 AM) ───
+  cron.schedule('30 9 1 6,12 *', async () => {
+    try {
+      const { getAllEmployees, getActivePerformanceReviewForEmployee } = require('../utils/sheets');
+      const employees = await getAllEmployees();
+      for (const employee of employees) {
+        if (!employee.slackUserId || !employee.managerSlackId) continue;
+        const active = await getActivePerformanceReviewForEmployee(employee.slackUserId, 'Semi-Annual');
+        if (!active) await startPerformanceReviewCase(app.client, employee, 'Semi-Annual');
+      }
+    } catch (err) {
+      console.error('Semi-annual performance review job error:', err);
+    }
+  }, { timezone: 'Asia/Riyadh' });
+
+  // ─── Performance Review Deadlines (weekdays at 9:45 AM) ──────────────────
+  // Handles overdue initial submissions, meeting reminders, status checks,
+  // edit-window lock, and automatic HR/CEO escalation for unequal ratings.
+  cron.schedule('45 9 * * 0-4', async () => {
+    try {
+      await processPerformanceReviewDeadlines(app.client);
+    } catch (err) {
+      console.error('Performance review deadline job error:', err);
+    }
+  }, { timezone: 'Asia/Riyadh' });
+
+  // ─── Monthly Performance Review Report (1st of month, 8:15 AM) ──────────
+  cron.schedule('15 8 1 * *', async () => {
+    try {
+      await sendMonthlyPerformanceReport(app.client);
+    } catch (err) {
+      console.error('Monthly performance review report error:', err);
     }
   }, { timezone: 'Asia/Riyadh' });
 

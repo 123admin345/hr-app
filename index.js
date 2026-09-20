@@ -5,6 +5,7 @@ const express = require('express');
 const { registerLeaveHandlers } = require('./src/handlers/leaveHandler');
 const { registerAdminHandlers } = require('./src/handlers/adminHandler');
 const { registerSalaryRaiseHandlers } = require('./src/handlers/salaryRaiseHandler');
+const { registerPerformanceReviewHandlers } = require('./src/handlers/performanceReviewHandler');
 const { registerScheduledJobs, registerReminderActions } = require('./src/schedulers/jobs');
 
 // ─── Initialize Bolt App ───────────────────────────────────────────────────
@@ -20,6 +21,7 @@ const app = new App({
 registerLeaveHandlers(app);
 registerAdminHandlers(app);
 registerSalaryRaiseHandlers(app);
+registerPerformanceReviewHandlers(app);
 registerReminderActions(app);
 
 // ─── Register scheduled jobs ───────────────────────────────────────────────
@@ -39,6 +41,6 @@ expressApp.listen(process.env.HEALTH_PORT || 3001, () => {
 (async () => {
   await app.start();
   console.log('⚡️ Slack HR App is running!');
-  console.log('📋 Registered commands: /request-leave, /my-balance, /hr-balance, /request-raise');
-  console.log('🕐 Scheduled jobs: OOO alerts (daily 8AM), Holiday announcements (Sunday 9AM), Year-end reminders (Nov/Dec 1st), Monthly reports (1st of month)');
+  console.log('📋 Registered commands: /request-leave, /my-balance, /hr-balance, /request-raise, /start-performance-review');
+  console.log('🕐 Scheduled jobs: leave and holiday notifications, monthly reports, contract renewal reviews, and semi-annual performance reviews');
 })();
